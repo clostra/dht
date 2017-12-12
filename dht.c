@@ -167,6 +167,7 @@ struct bucket {
     int af;
     unsigned char first[20];
     int count;                  /* number of nodes */
+    int max_count;              /* max number of nodes for this bucket */
     time_t time;                /* time of last reply in this bucket */
     struct node *nodes;
     struct sockaddr_storage cached;  /* the address of a likely candidate */
@@ -603,21 +604,6 @@ bucket_random(struct bucket *b, unsigned char *id_return)
     return 1;
 }
 
-/* Insert a new node into a bucket. */
-static struct node *
-insert_node(struct node *node)
-{
-    struct bucket *b = find_bucket(node->id, node->ss.ss_family);
-
-    if(b == NULL)
-        return NULL;
-
-    node->next = b->nodes;
-    b->nodes = node;
-    b->count++;
-    return node;
-}
-
 /* This is our definition of a known-good node. */
 static int
 node_good(struct node *node)
@@ -761,11 +747,37 @@ split_bucket(struct bucket *b)
     b->count = 0;
     new->next = b->next;
     b->next = new;
+
+    if (in_bucket(myid, b)) {
+        new->max_count = b->max_count;
+        b->max_count = MAX(b->max_count / 2, 8);
+    } else {
+        new->max_count = MAX(b->max_count / 2, 8);
+    }
+
     while(nodes) {
-        struct node *n;
-        n = nodes;
+        struct node *n = nodes;
         nodes = nodes->next;
-        insert_node(n);
+        while(1) {
+            struct bucket *t = find_bucket(n->id, n->ss.ss_family);
+            if(t->count >= t->max_count) {
+                if(in_bucket(myid, t)) {
+                    debugf("Splitting.\n");
+                    split_bucket(t);
+                    continue;
+                }
+                if(t->cached.ss_family == 0) {
+                    memcpy(&t->cached, &n->ss, n->sslen);
+                    t->cachedlen = n->sslen;
+                }
+                free(n);
+                break;
+            }
+            n->next = t->nodes;
+            t->nodes = n;
+            t->count++;
+            break;
+        }
     }
     return b;
 }
@@ -837,7 +849,7 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
         n = n->next;
     }
 
-    if(b->count >= 8) {
+    if(b->count >= b->max_count) {
         /* Bucket full.  Ping a dubious node */
         int dubious = 0;
         n = b->nodes;
@@ -867,7 +879,7 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
             if(!dubious)
                 split = 1;
             /* If there's only one bucket, split eagerly.  This is
-               incorrect unless there's more than 8 nodes in the DHT. */
+               incorrect unless there's more than max_nodes nodes in the DHT. */
             else if(b->af == AF_INET && buckets->next == NULL)
                 split = 1;
             else if(b->af == AF_INET6 && buckets6->next == NULL)
@@ -1559,8 +1571,8 @@ dump_bucket(FILE *f, struct bucket *b)
     struct node *n = b->nodes;
     fprintf(f, "Bucket ");
     print_hex(f, b->first, 20);
-    fprintf(f, " count %d age %d%s%s:\n",
-            b->count, (int)(now.tv_sec - b->time),
+    fprintf(f, " count %d/%d age %d%s%s:\n",
+            b->count, b->max_count, (int)(now.tv_sec - b->time),
             in_bucket(myid, b) ? " (mine)" : "",
             b->cached.ss_family ? " (cached)" : "");
     while(n) {
@@ -1695,6 +1707,7 @@ dht_init(int s, int s6, const unsigned char *id, const unsigned char *v)
         buckets = calloc(sizeof(struct bucket), 1);
         if(buckets == NULL)
             return -1;
+        buckets->max_count = 128;
         buckets->af = AF_INET;
 
         rc = set_nonblocking(s, 1);
@@ -1706,6 +1719,7 @@ dht_init(int s, int s6, const unsigned char *id, const unsigned char *v)
         buckets6 = calloc(sizeof(struct bucket), 1);
         if(buckets6 == NULL)
             return -1;
+        buckets6->max_count = 128;
         buckets6->af = AF_INET6;
 
         rc = set_nonblocking(s6, 1);

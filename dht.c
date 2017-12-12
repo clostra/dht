@@ -779,7 +779,6 @@ split_bucket(struct bucket *b)
             break;
         }
     }
-    dht_dump_tables(stdout);
     return b;
 }
 

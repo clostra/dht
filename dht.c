@@ -231,6 +231,15 @@ struct peer {
 #define DHT_SEARCH_EXPIRE_TIME (62 * 60)
 #endif
 
+#ifndef DHT_INFLIGHT_QUERIES
+#define DHT_INFLIGHT_QUERIES 4
+#endif
+
+#ifndef DHT_INFLIGHT_QUERY_GROWTH
+#define DHT_INFLIGHT_QUERY_GROWTH 3
+#endif
+
+
 struct storage {
     unsigned char id[20];
     int numpeers, maxpeers;
@@ -1153,7 +1162,7 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
     j = 0;
     for(i = 0; i < sr->numnodes; i++) {
         j += search_send_get_peers(sr, &sr->nodes[i]);
-        if(j >= 3)
+        if(j >= DHT_INFLIGHT_QUERIES)
             break;
     }
     sr->step_time = now.tv_sec;
@@ -2060,11 +2069,17 @@ dht_periodic(const void *buf, size_t buflen,
                                                sr, 0, NULL, 0);
                         }
                     }
-                    if(sr)
+                    if(sr) {
                         /* Since we received a reply, the number of
                            requests in flight has decreased.  Let's push
-                           another request. */
-                        search_send_get_peers(sr, NULL);
+                           more requests. */
+                        int j = 0;
+                        for(i = 0; i < sr->numnodes; i++) {
+                            j += search_send_get_peers(sr, &sr->nodes[i]);
+                            if(j >= DHT_INFLIGHT_QUERY_GROWTH)
+                                break;
+                        }
+                    }
                 }
                 if(sr) {
                     insert_search_node(id, from, fromlen, sr,

@@ -1126,6 +1126,8 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
         }
         j++;
     }
+    if(j < 8 && sr->numnodes < SEARCH_NODES)
+        all_done = 0;
 
     if(all_done) {
         if(sr->port == 0) {

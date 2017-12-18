@@ -703,6 +703,38 @@ blacklist_node(const unsigned char *id, const struct sockaddr *sa, int salen)
     next_blacklisted = (next_blacklisted + 1) % DHT_MAX_BLACKLISTED;
 }
 
+void dht_blacklist_address(const struct sockaddr *sa, int salen)
+{
+    int i;
+
+    struct node *n;
+    struct search *sr;
+    struct bucket *b;
+    b = sa->sa_family == AF_INET ? buckets : buckets6;
+    while(b) {
+        n = b->nodes;
+        while(n) {
+            /* Make the node easy to discard. */
+            if(memcmp(&n->ss, sa, salen) == 0) {
+                n->pinged = 3;
+                pinged(n, NULL);
+            }
+            n = n->next;
+        }
+        b = b->next;
+    }
+    /* Discard it from any searches in progress. */
+    sr = searches;
+    while(sr) {
+        if(sr->af != sa->sa_family)
+            continue;
+        for(i = 0; i < sr->numnodes; i++)
+            if(memcmp(&sr->nodes[i].ss, sa, salen) == 0)
+                flush_search_node(&sr->nodes[i], sr);
+        sr = sr->next;
+    }
+}
+
 static int
 node_blacklisted(const struct sockaddr *sa, int salen)
 {

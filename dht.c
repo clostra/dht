@@ -240,6 +240,10 @@ struct peer {
 #define DHT_INFLIGHT_QUERY_GROWTH 3
 #endif
 
+#ifndef DHT_SEARCH_RETRANSMIT
+#define DHT_SEARCH_RETRANSMIT 1
+#endif
+
 
 struct storage {
     unsigned char id[20];
@@ -976,8 +980,8 @@ find_search(unsigned short tid, int af)
    target.  We just got a new candidate, insert it at the right spot or
    discard it. */
 
-static int
-insert_search_node(unsigned char *id,
+static struct search_node *
+insert_search_node(const unsigned char *id,
                    const struct sockaddr *sa, int salen,
                    struct search *sr, int replied,
                    unsigned char *token, int token_len)
@@ -987,7 +991,7 @@ insert_search_node(unsigned char *id,
 
     if(sa->sa_family != sr->af) {
         debugf("Attempted to insert node in the wrong family.\n");
-        return 0;
+        return NULL;
     }
 
     for(i = 0; i < sr->numnodes; i++) {
@@ -1000,7 +1004,7 @@ insert_search_node(unsigned char *id,
     }
 
     if(i == SEARCH_NODES)
-        return 0;
+        return NULL;
 
     if(sr->numnodes < SEARCH_NODES)
         sr->numnodes++;
@@ -1033,7 +1037,7 @@ found:
         }
     }
 
-    return 1;
+    return n;
 }
 
 static void
@@ -1084,19 +1088,19 @@ search_send_get_peers(struct search *sr, struct search_node *n)
         int i;
         for(i = 0; i < sr->numnodes; i++) {
             if(sr->nodes[i].pinged < 3 && !sr->nodes[i].replied &&
-               sr->nodes[i].request_time < now.tv_sec - 15)
+               sr->nodes[i].request_time < now.tv_sec - DHT_SEARCH_RETRANSMIT)
                 n = &sr->nodes[i];
         }
     }
 
     if(!n || n->pinged >= 3 || n->replied ||
-       n->request_time >= now.tv_sec - 15)
+       n->request_time >= now.tv_sec - DHT_SEARCH_RETRANSMIT)
         return 0;
 
     debugf("Sending get_peers.\n");
     make_tid(tid, "gp", sr->tid);
     send_get_peers((struct sockaddr*)&n->ss, n->sslen, tid, 4, sr->id, -1,
-                   n->reply_time >= now.tv_sec - 15);
+                   n->reply_time >= now.tv_sec - DHT_SEARCH_RETRANSMIT);
     n->pinged++;
     n->request_time = now.tv_sec;
     /* If the node happens to be in our main routing table, mark it
@@ -1121,7 +1125,6 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
         if(n->pinged >= 3)
             continue;
         if(!n->replied) {
-            all_done = 0;
             break;
         }
         j++;
@@ -1170,7 +1173,7 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
         return;
     }
 
-    if(sr->step_time + 15 >= now.tv_sec)
+    if(sr->step_time + DHT_SEARCH_RETRANSMIT >= now.tv_sec)
         return;
 
     j = 0;
@@ -1957,6 +1960,19 @@ bucket_maintenance(int af)
     return 0;
 }
 
+void
+add_search_node(const unsigned char *id, const struct sockaddr *sa, int salen)
+{
+    struct search *sr = searches;
+    for(; sr; sr = sr->next) {
+        if(sr->af == sa->sa_family && sr->numnodes < SEARCH_NODES) {
+            struct search_node *n = insert_search_node(id, sa, salen, sr, 0, NULL, 0);
+            if(n)
+                search_send_get_peers(sr, n);
+        }
+    }
+}
+
 int
 dht_periodic(const void *buf, size_t buflen,
              const struct sockaddr *from, int fromlen,
@@ -2032,6 +2048,7 @@ dht_periodic(const void *buf, size_t buflen,
             if(tid_match(tid, "pn", NULL)) {
                 debugf("Pong!\n");
                 new_node(id, from, fromlen, 2);
+                add_search_node(id, from, fromlen);
             } else if(tid_match(tid, "fn", NULL) ||
                       tid_match(tid, "gp", NULL)) {
                 int gp = 0;
@@ -2048,9 +2065,11 @@ dht_periodic(const void *buf, size_t buflen,
                 } else if(gp && sr == NULL) {
                     debugf("Unknown search!\n");
                     new_node(id, from, fromlen, 1);
+                    add_search_node(id, from, fromlen);
                 } else {
                     int i;
                     new_node(id, from, fromlen, 2);
+                    add_search_node(id, from, fromlen);
                     for(i = 0; i < nodes_len / 26; i++) {
                         unsigned char *ni = nodes + i * 26;
                         struct sockaddr_in sin;
@@ -2067,6 +2086,7 @@ dht_periodic(const void *buf, size_t buflen,
                                                sizeof(sin),
                                                sr, 0, NULL, 0);
                         }
+                        add_search_node(ni, (struct sockaddr*)&sin, sizeof(sin));
                     }
                     for(i = 0; i < nodes6_len / 38; i++) {
                         unsigned char *ni = nodes6 + i * 38;
@@ -2084,6 +2104,7 @@ dht_periodic(const void *buf, size_t buflen,
                                                sizeof(sin6),
                                                sr, 0, NULL, 0);
                         }
+                        add_search_node(ni, (struct sockaddr*)&sin6, sizeof(sin6));
                     }
                     if(sr) {
                         /* Since we received a reply, the number of
@@ -2121,9 +2142,11 @@ dht_periodic(const void *buf, size_t buflen,
                 if(!sr) {
                     debugf("Unknown search!\n");
                     new_node(id, from, fromlen, 1);
+                    add_search_node(id, from, fromlen);
                 } else {
                     int i;
                     new_node(id, from, fromlen, 2);
+                    add_search_node(id, from, fromlen);
                     for(i = 0; i < sr->numnodes; i++)
                         if(id_cmp(sr->nodes[i].id, id) == 0) {
                             sr->nodes[i].request_time = 0;
@@ -2144,12 +2167,14 @@ dht_periodic(const void *buf, size_t buflen,
         case PING:
             debugf("Ping (%d)!\n", tid_len);
             new_node(id, from, fromlen, 1);
+            add_search_node(id, from, fromlen);
             debugf("Sending pong.\n");
             send_pong(from, fromlen, tid, tid_len);
             break;
         case FIND_NODE:
             debugf("Find node!\n");
             new_node(id, from, fromlen, 1);
+            add_search_node(id, from, fromlen);
             debugf("Sending closest nodes (%d).\n", want);
             send_closest_nodes(from, fromlen,
                                tid, tid_len, target, want,
@@ -2158,6 +2183,7 @@ dht_periodic(const void *buf, size_t buflen,
         case GET_PEERS:
             debugf("Get_peers!\n");
             new_node(id, from, fromlen, 1);
+            add_search_node(id, from, fromlen);
             if(id_cmp(info_hash, zeroes) == 0) {
                 debugf("Eek!  Got get_peers with no info_hash.\n");
                 send_error(from, fromlen, tid, tid_len,
@@ -2186,6 +2212,7 @@ dht_periodic(const void *buf, size_t buflen,
         case ANNOUNCE_PEER:
             debugf("Announce peer!\n");
             new_node(id, from, fromlen, 1);
+            add_search_node(id, from, fromlen);
             if(id_cmp(info_hash, zeroes) == 0) {
                 debugf("Announce_peer with no info_hash.\n");
                 send_error(from, fromlen, tid, tid_len,
@@ -2225,21 +2252,14 @@ dht_periodic(const void *buf, size_t buflen,
     }
 
     if(search_time > 0 && now.tv_sec >= search_time) {
-        struct search *sr;
-        sr = searches;
+        struct search *sr = searches;
+        search_time = 0;
         while(sr) {
-            if(!sr->done && sr->step_time + 5 <= now.tv_sec) {
+            if(!sr->done && sr->step_time + DHT_SEARCH_RETRANSMIT <= now.tv_sec) {
                 search_step(sr, callback, closure);
             }
-            sr = sr->next;
-        }
-
-        search_time = 0;
-
-        sr = searches;
-        while(sr) {
             if(!sr->done) {
-                time_t tm = sr->step_time + 15 + random() % 10;
+                time_t tm = sr->step_time + DHT_SEARCH_RETRANSMIT * 2;
                 if(search_time == 0 || search_time > tm)
                     search_time = tm;
             }
@@ -2375,6 +2395,7 @@ dht_insert_node(const unsigned char *id, struct sockaddr *sa, int salen)
     }
 
     n = new_node(id, (struct sockaddr*)sa, salen, 0);
+    add_search_node(id, (struct sockaddr*)sa, salen);
     return !!n;
 }
 

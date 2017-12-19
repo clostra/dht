@@ -2223,8 +2223,8 @@ dht_periodic(const void *buf, size_t buflen,
                 break;
             } else {
                 struct storage *st = find_storage(info_hash);
-                unsigned char token[TOKEN_SIZE];
-                make_token(from, 0, token);
+                unsigned char new_token[TOKEN_SIZE];
+                make_token(from, 0, new_token);
                 if(st && st->numpeers > 0) {
                      debugf("Sending found%s peers.\n",
                             from->sa_family == AF_INET6 ? " IPv6" : "");
@@ -2232,12 +2232,12 @@ dht_periodic(const void *buf, size_t buflen,
                                         tid, tid_len,
                                         info_hash, want,
                                         from->sa_family, st,
-                                        token, TOKEN_SIZE);
+                                        new_token, TOKEN_SIZE);
                 } else {
                     debugf("Sending nodes for get_peers.\n");
                     send_closest_nodes(from, fromlen,
                                        tid, tid_len, info_hash, want,
-                                       0, NULL, token, TOKEN_SIZE);
+                                       0, NULL, new_token, TOKEN_SIZE);
                 }
             }
             break;

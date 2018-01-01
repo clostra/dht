@@ -84,18 +84,6 @@ extern int dht_gettimeofday(struct timeval *tv, struct timezone *tz);
 #define EAFNOSUPPORT WSAEAFNOSUPPORT
 
 static int
-set_nonblocking(int fd, int nonblocking)
-{
-    int rc;
-
-    unsigned long mode = !!nonblocking;
-    rc = ioctlsocket(fd, FIONBIO, &mode);
-    if(rc != 0)
-        errno = WSAGetLastError();
-    return (rc == 0 ? 0 : -1);
-}
-
-static int
 random(void)
 {
     return rand();
@@ -110,23 +98,6 @@ extern const char *inet_ntop(int, const void *, char *, socklen_t);
 /* There is no snprintf in MSVCRT. */
 #define snprintf _snprintf
 #endif
-
-#else
-
-static int
-set_nonblocking(int fd, int nonblocking)
-{
-    int rc;
-    rc = fcntl(fd, F_GETFL, 0);
-    if(rc < 0)
-        return -1;
-
-    rc = fcntl(fd, F_SETFL, nonblocking?(rc | O_NONBLOCK):(rc & ~O_NONBLOCK));
-    if(rc < 0)
-        return -1;
-
-    return 0;
-}
 
 #endif
 
@@ -244,7 +215,6 @@ struct peer {
 #define DHT_SEARCH_RETRANSMIT 1
 #endif
 
-
 struct storage {
     unsigned char id[20];
     int numpeers, maxpeers;
@@ -285,6 +255,9 @@ static int send_peer_announced(const struct sockaddr *sa, int salen,
 static int send_error(const struct sockaddr *sa, int salen,
                       unsigned char *tid, int tid_len,
                       int code, const char *message);
+
+static void
+add_search_node(const unsigned char *id, const struct sockaddr *sa, int salen);
 
 #define ERROR 0
 #define REPLY 1
@@ -608,6 +581,30 @@ bucket_random(struct bucket *b, unsigned char *id_return)
     return 1;
 }
 
+/* Insert a new node into a bucket.
+   Returns 1 if the node was inserted, 0 if it was cached, -1 otherwise. */
+int
+insert_node(struct node *node)
+{
+    struct bucket *b = find_bucket(node->id, node->ss.ss_family);
+
+    if(b == NULL)
+        return -1;
+
+    if(b->count >= b->max_count) {
+        if(b->cached.ss_family == 0) {
+            memcpy(&b->cached, &node->ss, node->sslen);
+            b->cachedlen = node->sslen;
+            return 0;
+        }
+        return -1;
+    }
+    node->next = b->nodes;
+    b->nodes = node;
+    b->count++;
+    return 1;
+}
+
 /* This is our definition of a known-good node. */
 static int
 node_good(struct node *node)
@@ -754,7 +751,6 @@ node_blacklisted(const struct sockaddr *sa, int salen)
     return 0;
 }
 
-/* Split a bucket into two equal parts. */
 static struct bucket *
 split_bucket(struct bucket *b)
 {
@@ -794,25 +790,9 @@ split_bucket(struct bucket *b)
     while(nodes) {
         struct node *n = nodes;
         nodes = nodes->next;
-        while(1) {
-            struct bucket *t = find_bucket(n->id, n->ss.ss_family);
-            if(t->count >= t->max_count) {
-                if(in_bucket(myid, t)) {
-                    debugf("Splitting.\n");
-                    split_bucket(t);
-                    continue;
-                }
-                if(t->cached.ss_family == 0) {
-                    memcpy(&t->cached, &n->ss, n->sslen);
-                    t->cachedlen = n->sslen;
-                }
-                free(n);
-                break;
-            }
-            n->next = t->nodes;
-            t->nodes = n;
-            t->count++;
-            break;
+        rc = insert_node(n);
+        if(rc <= 0) {
+            free(n);
         }
     }
     return b;
@@ -826,7 +806,7 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
 {
     struct bucket *b = find_bucket(id, sa->sa_family);
     struct node *n;
-    int mybucket, split;
+    int mybucket;
 
     if(b == NULL)
         return NULL;
@@ -856,6 +836,8 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
                     n->pinged_time = 0;
                 }
             }
+            if(confirm == 2)
+                add_search_node(id, sa, salen);
             return n;
         }
         n = n->next;
@@ -880,6 +862,8 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
             n->reply_time = confirm >= 2 ? now.tv_sec : 0;
             n->pinged_time = 0;
             n->pinged = 0;
+            if(confirm == 2)
+                add_search_node(id, sa, salen);
             return n;
         }
         n = n->next;
@@ -910,19 +894,7 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
             n = n->next;
         }
 
-        split = 0;
-        if(mybucket) {
-            if(!dubious)
-                split = 1;
-            /* If there's only one bucket, split eagerly.  This is
-               incorrect unless there's more than max_nodes nodes in the DHT. */
-            else if(b->af == AF_INET && buckets->next == NULL)
-                split = 1;
-            else if(b->af == AF_INET6 && buckets6->next == NULL)
-                split = 1;
-        }
-
-        if(split) {
+        if(!dubious) {
             debugf("Splitting.\n");
             b = split_bucket(b);
             return new_node(id, sa, salen, confirm);
@@ -934,6 +906,8 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
             b->cachedlen = salen;
         }
 
+        if(confirm == 2)
+            add_search_node(id, sa, salen);
         return NULL;
     }
 
@@ -949,6 +923,8 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
     n->next = b->nodes;
     b->nodes = n;
     b->count++;
+    if(confirm == 2)
+        add_search_node(id, sa, salen);
     return n;
 }
 
@@ -1012,7 +988,7 @@ find_search(unsigned short tid, int af)
    target.  We just got a new candidate, insert it at the right spot or
    discard it. */
 
-static struct search_node *
+static struct search_node*
 insert_search_node(const unsigned char *id,
                    const struct sockaddr *sa, int salen,
                    struct search *sr, int replied,
@@ -1140,6 +1116,21 @@ search_send_get_peers(struct search *sr, struct search_node *n)
     node = find_node(n->id, n->ss.ss_family);
     if(node) pinged(node, NULL);
     return 1;
+}
+
+/* Insert a new node into any incomplete search. */
+static void
+add_search_node(const unsigned char *id, const struct sockaddr *sa, int salen)
+{
+    struct search *sr;
+    for(sr = searches; sr; sr = sr->next) {
+        if(sr->af == sa->sa_family && sr->numnodes < SEARCH_NODES) {
+            struct search_node *n =
+                insert_search_node(id, sa, salen, sr, 0, NULL, 0);
+            if(n)
+                search_send_get_peers(sr, n);
+        }
+    }
 }
 
 /* When a search is in progress, we periodically call search_step to send
@@ -1746,10 +1737,6 @@ dht_init(int s, int s6, const unsigned char *id, const unsigned char *v)
             return -1;
         buckets->max_count = 128;
         buckets->af = AF_INET;
-
-        rc = set_nonblocking(s, 1);
-        if(rc < 0)
-            goto fail;
     }
 
     if(s6 >= 0) {
@@ -1758,10 +1745,6 @@ dht_init(int s, int s6, const unsigned char *id, const unsigned char *v)
             return -1;
         buckets6->max_count = 128;
         buckets6->af = AF_INET6;
-
-        rc = set_nonblocking(s6, 1);
-        if(rc < 0)
-            goto fail;
     }
 
     memcpy(myid, id, 20);
@@ -1962,9 +1945,10 @@ bucket_maintenance(int af)
                         struct bucket *otherbucket;
                         otherbucket =
                             find_bucket(id, af == AF_INET ? AF_INET6 : AF_INET);
-                        if(otherbucket && otherbucket->count < 8)
+                        if(otherbucket &&
+                           otherbucket->count < otherbucket->max_count)
                             /* The corresponding bucket in the other family
-                               is emptyish -- querying both is useful. */
+                               is not full -- querying both is useful. */
                             want = WANT4 | WANT6;
                         else if(random() % 37 == 0)
                             /* Most of the time, this just adds overhead.
@@ -2426,8 +2410,7 @@ dht_insert_node(const unsigned char *id, struct sockaddr *sa, int salen)
         return -1;
     }
 
-    n = new_node(id, (struct sockaddr*)sa, salen, 0);
-    add_search_node(id, (struct sockaddr*)sa, salen);
+    n = new_node(id, sa, salen, 0);
     return !!n;
 }
 
@@ -2488,7 +2471,7 @@ dht_send(const void *buf, size_t len, int flags,
         return -1;
     }
 
-    return sendto(s, buf, len, flags, sa, salen);
+    return dht_sendto(s, buf, len, flags, sa, salen);
 }
 
 int

@@ -1976,19 +1976,6 @@ bucket_maintenance(int af)
     return 0;
 }
 
-void
-add_search_node(const unsigned char *id, const struct sockaddr *sa, int salen)
-{
-    struct search *sr = searches;
-    for(; sr; sr = sr->next) {
-        if(sr->af == sa->sa_family && sr->numnodes < SEARCH_NODES) {
-            struct search_node *n = insert_search_node(id, sa, salen, sr, 0, NULL, 0);
-            if(n)
-                search_send_get_peers(sr, n);
-        }
-    }
-}
-
 int
 dht_periodic(const void *buf, size_t buflen,
              const struct sockaddr *from, int fromlen,

@@ -203,6 +203,7 @@ struct peer {
 #define DHT_SEARCH_EXPIRE_TIME (62 * 60)
 #endif
 
+/* The maximum number of in-flight queries per search. */
 #ifndef DHT_INFLIGHT_QUERIES
 #define DHT_INFLIGHT_QUERIES 4
 #endif
@@ -211,6 +212,7 @@ struct peer {
 #define DHT_INFLIGHT_QUERY_GROWTH 3
 #endif
 
+/* The retransmit timeout when performing searches. */
 #ifndef DHT_SEARCH_RETRANSMIT
 #define DHT_SEARCH_RETRANSMIT 1
 #endif
@@ -581,30 +583,6 @@ bucket_random(struct bucket *b, unsigned char *id_return)
     return 1;
 }
 
-/* Insert a new node into a bucket.
-   Returns 1 if the node was inserted, 0 if it was cached, -1 otherwise. */
-int
-insert_node(struct node *node)
-{
-    struct bucket *b = find_bucket(node->id, node->ss.ss_family);
-
-    if(b == NULL)
-        return -1;
-
-    if(b->count >= b->max_count) {
-        if(b->cached.ss_family == 0) {
-            memcpy(&b->cached, &node->ss, node->sslen);
-            b->cachedlen = node->sslen;
-            return 0;
-        }
-        return -1;
-    }
-    node->next = b->nodes;
-    b->nodes = node;
-    b->count++;
-    return 1;
-}
-
 /* This is our definition of a known-good node. */
 static int
 node_good(struct node *node)
@@ -751,51 +729,134 @@ node_blacklisted(const struct sockaddr *sa, int salen)
     return 0;
 }
 
-static struct bucket *
-split_bucket(struct bucket *b)
+static struct node *
+append_nodes(struct node *n1, struct node *n2)
+{
+    struct node *n;
+
+    if(n1 == NULL)
+        return n2;
+
+    if(n2 == NULL)
+        return n1;
+
+    n = n1;
+    while(n->next != NULL)
+        n = n->next;
+
+    n->next = n2;
+    return n1;
+}
+
+/* Insert a new node into a bucket, don't check for duplicates.
+   Returns 1 if the node was inserted, 0 if a bucket must be split. */
+static int
+insert_node(struct node *node, struct bucket **split_return)
+{
+    struct bucket *b = find_bucket(node->id, node->ss.ss_family);
+
+    if(b == NULL)
+        return -1;
+
+    if(b->count >= b->max_count) {
+        *split_return = b;
+        return 0;
+    }
+    node->next = b->nodes;
+    b->nodes = node;
+    b->count++;
+    return 1;
+}
+
+/* Splits a bucket, and returns the list of nodes that must be reinserted
+   into the routing table. */
+static int
+split_bucket_helper(struct bucket *b, struct node **nodes_return)
 {
     struct bucket *new;
-    struct node *nodes;
     int rc;
     unsigned char new_id[20];
 
+    if(!in_bucket(myid, b)) {
+        debugf("Attempted to split wrong bucket.\n");
+        return -1;
+    }
+
     rc = bucket_middle(b, new_id);
     if(rc < 0)
-        return NULL;
+        return -1;
 
     new = calloc(1, sizeof(struct bucket));
     if(new == NULL)
-        return NULL;
-
-    new->af = b->af;
+        return -1;
 
     send_cached_ping(b);
 
+    new->af = b->af;
     memcpy(new->first, new_id, 20);
     new->time = b->time;
 
-    nodes = b->nodes;
+    *nodes_return = b->nodes;
     b->nodes = NULL;
     b->count = 0;
     new->next = b->next;
     b->next = new;
 
-    if (in_bucket(myid, b)) {
+    if(in_bucket(myid, b)) {
         new->max_count = b->max_count;
         b->max_count = MAX(b->max_count / 2, 8);
     } else {
         new->max_count = MAX(b->max_count / 2, 8);
     }
 
-    while(nodes) {
-        struct node *n = nodes;
-        nodes = nodes->next;
-        rc = insert_node(n);
-        if(rc <= 0) {
+    return 1;
+}
+
+static int
+split_bucket(struct bucket *b)
+{
+    int rc;
+    struct node *nodes = NULL;
+    struct node *n = NULL;
+
+    debugf("Splitting.\n");
+    rc = split_bucket_helper(b, &nodes);
+    if(rc < 0) {
+        debugf("Couldn't split bucket");
+        return -1;
+    }
+
+    while(n != NULL || nodes != NULL) {
+        struct bucket *split = NULL;
+        if(n == NULL) {
+            n = nodes;
+            nodes = nodes->next;
+            n->next = NULL;
+        }
+        rc = insert_node(n, &split);
+        if(rc < 0) {
+            debugf("Couldn't insert node.\n");
             free(n);
+            n = NULL;
+        } else if(rc > 0) {
+            n = NULL;
+        } else if(!in_bucket(myid, split)) {
+            free(n);
+            n = NULL;
+        } else {
+            struct node *insert = NULL;
+            debugf("Splitting (recursive).\n");
+            rc = split_bucket_helper(split, &insert);
+            if(rc < 0) {
+                debugf("Couldn't split bucket.\n");
+                free(n);
+                n = NULL;
+            } else {
+                nodes = append_nodes(nodes, insert);
+            }
         }
     }
-    return b;
+    return 1;
 }
 
 /* We just learnt about a node, not necessarily a new one.  Confirm is 1 if
@@ -804,10 +865,13 @@ static struct node *
 new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
          int confirm)
 {
-    struct bucket *b = find_bucket(id, sa->sa_family);
+    struct bucket *b;
     struct node *n;
     int mybucket;
 
+ again:
+
+    b = find_bucket(id, sa->sa_family);
     if(b == NULL)
         return NULL;
 
@@ -894,10 +958,12 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
             n = n->next;
         }
 
-        if(!dubious) {
-            debugf("Splitting.\n");
-            b = split_bucket(b);
-            return new_node(id, sa, salen, confirm);
+        if(mybucket && !dubious) {
+            int rc;
+            rc = split_bucket(b);
+            if(rc > 0)
+                goto again;
+            return NULL;
         }
 
         /* No space for this node.  Cache it away for later. */
@@ -1909,8 +1975,10 @@ bucket_maintenance(int af)
     b = af == AF_INET ? buckets : buckets6;
 
     while(b) {
+        /* 10 minutes for an 8-node bucket */
+        int to = MAX(600 / (b->max_count / 8), 30);
         struct bucket *q;
-        if(b->time < now.tv_sec - 600) {
+        if(b->time < now.tv_sec - to) {
             /* This bucket hasn't seen any positive confirmation for a long
                time.  Pick a random id in this bucket's range, and send
                a request to a random node. */
@@ -2258,11 +2326,13 @@ dht_periodic(const void *buf, size_t buflen,
         struct search *sr = searches;
         search_time = 0;
         while(sr) {
-            if(!sr->done && sr->step_time + DHT_SEARCH_RETRANSMIT <= now.tv_sec) {
+            if(!sr->done &&
+               sr->step_time + DHT_SEARCH_RETRANSMIT / 2 + 1 <= now.tv_sec) {
                 search_step(sr, callback, closure);
             }
             if(!sr->done) {
-                time_t tm = sr->step_time + DHT_SEARCH_RETRANSMIT * 2;
+                time_t tm = sr->step_time +
+                    DHT_SEARCH_RETRANSMIT + random() % DHT_SEARCH_RETRANSMIT;
                 if(search_time == 0 || search_time > tm)
                     search_time = tm;
             }
@@ -2283,12 +2353,14 @@ dht_periodic(const void *buf, size_t buflen,
                 soon |= neighbourhood_maintenance(AF_INET6);
         }
 
-        /* In order to maintain all buckets' age within 600 seconds, worst
-           case is roughly 27 seconds, assuming the table is 22 bits deep.
-           We want to keep a margin for neighborhood maintenance, so keep
-           this within 25 seconds. */
+        /* Given the timeouts in bucket_maintenance, with a 22-bucket
+           table, worst case is a ping every 18 seconds (22 buckets plus
+           11 buckets overhead for the larger buckets).  Keep the "soon"
+           case within 15 seconds, which gives some margin for neighbourhood
+           maintenance. */
+
         if(soon)
-            confirm_nodes_time = now.tv_sec + 5 + random() % 20;
+            confirm_nodes_time = now.tv_sec + 5 + random() % 10;
         else
             confirm_nodes_time = now.tv_sec + 60 + random() % 120;
     }

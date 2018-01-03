@@ -1206,6 +1206,7 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
 {
     int i, j;
     int all_done = 1;
+    int nodes_attempted = 0;
 
     /* Check if the first 8 live nodes have replied. */
     j = 0;
@@ -1218,7 +1219,14 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
         }
         j++;
     }
-    if(j < 8 && sr->numnodes < SEARCH_NODES)
+    /* Count the number we've attempted to contact. */
+    for(i = 0; i < sr->numnodes; i++) {
+        struct search_node *n = &sr->nodes[i];
+        if(n->pinged >= 3 || n->replied) {
+            nodes_attempted++;
+        }
+    }
+    if(j < 8 && nodes_attempted < SEARCH_NODES)
         all_done = 0;
 
     if(all_done) {

@@ -2837,7 +2837,7 @@ send_announce_peer(const struct sockaddr *sa, int salen,
 
     rc = snprintf(buf + i, 512 - i, "d1:ad2:id20:"); INC(i, rc, 512);
     COPY(buf, i, myid, 20, 512);
-    rc = snprintf(buf + i, 512 - i, "9:info_hash20:"); INC(i, rc, 512);
+    rc = snprintf(buf + i, 512 - i, "12:implied_porti1e9:info_hash20:"); INC(i, rc, 512);
     COPY(buf, i, infohash, 20, 512);
     rc = snprintf(buf + i, 512 - i, "4:porti%ue5:token%d:", (unsigned)port,
                   token_len);

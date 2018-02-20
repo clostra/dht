@@ -711,6 +711,25 @@ void dht_blacklist_address(const struct sockaddr *sa, int salen)
     }
 }
 
+size_t dht_num_searches()
+{
+    return numsearches;
+}
+
+// 0: not searching, 1: searching, 2: announcing
+int dht_is_searching(const unsigned char* id)
+{
+    int i;
+    struct search *sr = searches;
+    while(sr) {
+        for(i = 0; i < sr->numnodes; i++)
+            if(!id_cmp(id, sr->id))
+                return sr->port ? 2 : 1;
+        sr = sr->next;
+    }
+    return 0;
+}
+
 static int
 node_blacklisted(const struct sockaddr *sa, int salen)
 {

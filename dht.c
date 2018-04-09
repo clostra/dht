@@ -723,7 +723,7 @@ int dht_is_searching(const unsigned char* id)
     struct search *sr = searches;
     while(sr) {
         for(i = 0; i < sr->numnodes; i++)
-            if(!id_cmp(id, sr->id))
+            if(!sr->done && !id_cmp(id, sr->id))
                 return sr->port ? 2 : 1;
         sr = sr->next;
     }

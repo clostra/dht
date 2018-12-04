@@ -54,7 +54,7 @@ int dht_get_nodes(struct sockaddr_in *sin, int *num,
                   struct sockaddr_in6 *sin6, int *num6);
 int dht_uninit(void);
 
-size_t dht_num_searches();
+size_t dht_num_searches(void);
 int dht_is_searching(const unsigned char* id);
 
 /* This must be provided by the user. */

@@ -702,11 +702,10 @@ void dht_blacklist_address(const struct sockaddr *sa, int salen)
     /* Discard it from any searches in progress. */
     sr = searches;
     while(sr) {
-        if(sr->af != sa->sa_family)
-            continue;
-        for(i = 0; i < sr->numnodes; i++)
-            if(memcmp(&sr->nodes[i].ss, sa, salen) == 0)
-                flush_search_node(&sr->nodes[i], sr);
+        if(sr->af == sa->sa_family)
+            for(i = 0; i < sr->numnodes; i++)
+                if(memcmp(&sr->nodes[i].ss, sa, salen) == 0)
+                    flush_search_node(&sr->nodes[i], sr);
         sr = sr->next;
     }
 }

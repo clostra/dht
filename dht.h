@@ -45,7 +45,7 @@ int dht_periodic(const void *buf, size_t buflen,
                  time_t *tosleep, dht_callback *callback, void *closure);
 int dht_search(const unsigned char *id, int port, int af,
                dht_callback *callback, void *closure);
-void dht_blacklist_address(const struct sockaddr *sa, int salen);
+void dht_remove_address(const struct sockaddr *sa, int salen);
 int dht_nodes(int af,
               int *good_return, int *dubious_return, int *cached_return,
               int *incoming_return);

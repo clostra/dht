@@ -679,7 +679,7 @@ blacklist_node(const unsigned char *id, const struct sockaddr *sa, int salen)
     next_blacklisted = (next_blacklisted + 1) % DHT_MAX_BLACKLISTED;
 }
 
-void dht_blacklist_address(const struct sockaddr *sa, int salen)
+void dht_remove_address(const struct sockaddr *sa, int salen)
 {
     int i;
 
